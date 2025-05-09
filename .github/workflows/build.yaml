@@ -106,9 +106,9 @@ jobs:
           sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
           sudo chmod +x /usr/bin/yq
           for file in $(find ./values -type f -name '*.yaml'); do
-            ENV=$(yq e '.WEB' $file)
+            ENV=$(yq e '.ENV' $file)
             if [ "$ENV" = "${{ needs.build.outputs.env }}" ]; then
-              yq e -i '.IMAGE.tag = strenv(IMAGE)' $file
+              yq e -i '.WEB.IMAGE.tag = strenv(IMAGE)' $file
             fi
           done
       
