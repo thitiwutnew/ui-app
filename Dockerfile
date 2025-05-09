@@ -8,7 +8,7 @@ RUN npm install
 
 COPY . .
 RUN npm run build 
-# RUN npm run build-game #gamelotto
+# RUN npm run build-game #gamelotto88888
 #
 # Stage 2: Serve the built app with Nginx
 FROM habor-proxy.analytichpxv3.online/dockerhub/nginx:1.23-alpine
