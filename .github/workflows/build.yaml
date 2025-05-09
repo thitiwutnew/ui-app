@@ -1,15 +1,33 @@
-name: CI/CD Pipeline
-
-env:
-  NAME: new-ui
+# File: .github/workflows/ci.yml
+name: CI Pipeline
 
 on:
   push:
     branches:
       - main
+      - develop
+      - releases/**
+    tags:        
+      - v*
+
+env:
+  IMAGE_NAME: new-ui
+
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04  # Uses GitHub-hosted runner
+    environment: dev
+    permissions:
+      contents: read
+      packages: write
+      # This is used to complete the identity challenge
+      # with sigstore/fulcio when running outside of PRs.
+      id-token: write
+    outputs:
+      image_tag: ${{ steps.variables.outputs.image_tag }}
+      env: ${{ steps.variables.outputs.env }}
+      repo: ${{ steps.variables.outputs.repo }}
+      path_repo: ${{ steps.variables.outputs.path_repo }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,88 +36,88 @@ jobs:
         id: variables
         run: |
           if [[ $GITHUB_REF == "refs/heads/main" ]]; then
-            echo "env_name=uat" >> $GITHUB_OUTPUT
+            echo "env=uat" >> $GITHUB_OUTPUT
             echo "image_tag=uat-$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
+            echo "repo=thitiwutnew/calculater-app-nonprod" >> $GITHUB_OUTPUT
+            echo "path_repo=k8s-calculator-nonprd" >> $GITHUB_OUTPUT
           elif [[ $GITHUB_EVENT_NAME == "push" && $GITHUB_REF == "refs/tags/"* ]]; then
-            echo "env_name=prd" >> $GITHUB_OUTPUT
             echo "image_tag=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
+            echo "ref_tag=uat-$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
+            echo "env=prd" >> $GITHUB_OUTPUT
+            echo "repo=miw1513/k8s-calculator-prd" >> $GITHUB_OUTPUT
+            echo "path_repo=k8s-calculator-prd" >> $GITHUB_OUTPUT
           else
-            echo "env_name=dev" >> $GITHUB_OUTPUT
             echo "image_tag=dev-$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
-            
+            echo "env=dev" >> $GITHUB_OUTPUT
+            echo "repo=thitiwutnew/calculater-app-nonprod" >> $GITHUB_OUTPUT
+            echo "path_repo=k8s-calculator-nonprd" >> $GITHUB_OUTPUT
           fi
 
-      - name: Generate a config.json
-        if: ${{ startsWith(github.ref, 'refs/heads/') }}
+
+      - name: Build Rust and Push (Develop)
+        if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'  }}
+        env:
+          USER_HARBOR: ${{ secrets.USER_HARBOR }}
+          PASS_HARBOR: ${{ secrets.PASS_HARBOR }}
+          REGISTRY: ${{ secrets.REGISTRY_HARBOR }}
+          TAG: ${{ steps.variables.outputs.image_tag }}
         run: |
-          echo ${{ secrets.JFROG_SERVER }}
-          echo "{\"auths\":{\"${{secrets.JFROG_SERVER}}\":{\"auth\":\"$(printf "%s:%s" "${{secrets.JFROG_USERNAME}}" "${{secrets.JFROG_PASSWORD}}" | base64 | tr -d '\n')\"}}}" > config.json
+          echo $PASS_HARBOR | docker login $REGISTRY -u $USER_HARBOR --password-stdin
+          docker build -t $REGISTRY/kubernetes-workshop/${{ env.IMAGE_NAME }}:$TAG .  
+          docker push $REGISTRY/kubernetes-workshop/${{ env.IMAGE_NAME }}:$TAG
 
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-
-      - name: Build an image and cache
-        if: ${{ startsWith(github.ref, 'refs/heads/') }}
+      - name: Retag Rust and Push (Uat & Production)
+        if: ${{  startsWith(github.ref, 'refs/tags/')  }}
+        env:
+          USER_HARBOR: ${{ secrets.USER_HARBOR }}
+          PASS_HARBOR: ${{ secrets.PASS_HARBOR }}
+          REGISTRY: ${{ secrets.REGISTRY_HARBOR }}
+          TAG: ${{ steps.variables.outputs.image_tag }}
         run: |
-          docker run \
-            -v $(pwd):/workspace \
-            -v $(pwd)/config.json:/kaniko/.docker/config.json:ro \
-            -v /tmp/.buildx-cache:/cache \
-            gcr.io/kaniko-project/executor:latest \
-              --context dir:///workspace/ \
-              --dockerfile Dockerfile \
-              --destination "${{secrets.JFROG_PATH}}/$NAME:${{ steps.variables.outputs.image_tag }}" \
-              --cache=true \
-              --cache-dir=/cache
+          echo $PASS_HARBOR | docker login $REGISTRY -u $USER_HARBOR --password-stdin
+          docker pull $REGISTRY/kubernetes-workshop/${{ env.IMAGE_NAME }}:${{ steps.variables.outputs.ref_tag }}
+          docker tag $REGISTRY/kubernetes-workshop/${{ env.IMAGE_NAME }}:${{ steps.variables.outputs.ref_tag }} $REGISTRY/kubernetes-workshop/${{ env.IMAGE_NAME }}:$TAG
+          docker push $REGISTRY/kubernetes-workshop/${{ env.IMAGE_NAME }}:$TAG
 
-      # - name: Trigger to Edit Images
-      #   run: |
-      #     curl -X POST \
-      #          -H "Authorization: token ${{ secrets.TOKEN_PUSH_REPO }}" \
-      #          -H "Accept: application/vnd.github.everest-preview+json" \
-      #          ${{ secrets.URL_K8S_LOTTO_INDO }} \
-      #          -d '{"event_type": "trigger_target_workflow", "client_payload": {"pathValue": ".Deployments.lottWallet.tagImage" , "image_tag": "${{ steps.variables.outputs.image_tag }}", "env": "${{ steps.variables.outputs.env_name }}" } }'
-             
-
-  tagging:
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+  trigger:
     needs: build
-    runs-on: self-hosted
+    # if: ${{ ( github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/' || github.ref == 'refs/heads/main' ) )  }}
+    name: Update Tag and Deploy
+    runs-on: ubuntu-24.04  # Uses GitHub-hosted runner
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up variables
-        id: variables
-        run: |
-          if [[ $GITHUB_REF == "refs/heads/master" ]]; then
-            echo "env_name=uat" >> $GITHUB_OUTPUT
-            echo "image_tag=uat-$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
-          elif [[ $GITHUB_EVENT_NAME == "push" && $GITHUB_REF == "refs/tags/"* ]]; then
-            echo "env_name=prd" >> $GITHUB_OUTPUT
-            echo "image_tag=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
-          else
-            echo "env_name=dev" >> $GITHUB_OUTPUT
-            echo "image_tag=dev-$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
-            
-          fi
-
-      - name: Tag Docker image
-        run: |
-          echo ${{secrets.JFROG_PASSWORD}} | docker login ${{secrets.JFROG_SERVER}} -u ${{secrets.JFROG_USERNAME}} --password-stdin
-          docker pull ${{secrets.JFROG_PATH}}/$NAME:uat-$(git rev-parse --short "$GITHUB_SHA")
-          docker tag ${{secrets.JFROG_PATH}}/$NAME:uat-$(git rev-parse --short "$GITHUB_SHA") ${{secrets.JFROG_PATH}}/$NAME:${{  github.ref_name }}
-          docker push ${{secrets.JFROG_PATH}}/$NAME:${{  github.ref_name }}
-
-    
+      - name: Check out my other private repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.build.outputs.repo }}
+          token: ${{ secrets.AUTH_GIT }}
+          path: ${{ needs.build.outputs.path_repo }}
+          ref: main
 
 
-
-
-
+      - name: Update image from registry
+        working-directory: ${{ needs.build.outputs.path_repo }}
+        env:
+          IMAGE: ${{ needs.build.outputs.image_tag }}
+        run: |-
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
+          for file in $(find ./values -type f -name '*.yaml'); do
+            ENV=$(yq e '.ENV' $file)
+            if [ "$ENV" = "${{ needs.build.outputs.env }}" ]; then
+              yq e -i '.WEB.IMAGE.tag = strenv(IMAGE)' $file
+            fi
+          done
+      
+      - name: Update repository
+        working-directory: ${{ needs.build.outputs.path_repo }}
+        run: |-
+          git config --global user.email "support@dependabot.com"
+          git config --global user.name "dependabot[bot]"
+          git add .
+          git commit -am "release: ${{ env.IMAGE_NAME }} env: ${{ needs.build.outputs.env }} version: ${{ needs.build.outputs.image_tag }}"
+          git push origin main
 
